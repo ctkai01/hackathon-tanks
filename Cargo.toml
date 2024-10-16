@@ -1,0 +1,20 @@
+[package]
+name = "hackathon-zinza-2024"
+version = "0.1.0"
+edition = "2021"
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[dependencies]
+serde = { version = "1.0.193", features = ["derive"] }
+serde_json = "1.0.108"
+socketioxide = {  version = "0.14.1", features = [ "extensions",
+    "state"] }
+tokio = { version = "1", features = ["full"] }
+tower = { version = "0.4.13", default-features = false }
+tower-http = { version = "0.6.1", features = ["cors", "fs"] }
+axum = "0.7.5"
+tracing = "0.1.37"
+tracing-subscriber = "0.3.18"
+# my server is https://zarena-dev1.zinza.com.vn 
+# // p8q27jwx
