@@ -1,131 +1,71 @@
-use std::sync::atomic::AtomicUsize;
-
-use serde::{Deserialize, Serialize};
-use socketioxide::{
-    extract::{Data, Extension, SocketRef, State},
-    SocketIo,
+use futures_util::FutureExt;
+use rust_socketio::{
+    asynchronous::{Client, ClientBuilder},
+    Payload, Socket,
 };
-use tower::ServiceBuilder;
-use tower_http::{cors::CorsLayer, services::ServeDir};
-use tracing::info;
-use tracing_subscriber::FmtSubscriber;
-use std::sync::Arc;
-
-#[derive(Deserialize, Serialize, Debug, Clone)]
-#[serde(transparent)]
-struct Username(String);
-
-#[derive(Deserialize, Serialize, Debug, Clone)]
-#[serde(rename_all = "camelCase", untagged)]
-enum Res {
-    Login {
-        #[serde(rename = "numUsers")]
-        num_users: usize,
-    },
-    UserEvent {
-        #[serde(rename = "numUsers")]
-        num_users: usize,
-        username: Username,
-    },
-    Message {
-        username: Username,
-        message: String,
-    },
-    Username {
-        username: Username,
-    },
-}
-#[derive(Clone)]
-struct UserCnt(Arc<AtomicUsize>);
-impl UserCnt {
-    fn new() -> Self {
-        Self(Arc::new(AtomicUsize::new(0)))
-    }
-    fn add_user(&self) -> usize {
-        self.0.fetch_add(1, std::sync::atomic::Ordering::SeqCst) + 1
-    }
-    fn remove_user(&self) -> usize {
-        self.0.fetch_sub(1, std::sync::atomic::Ordering::SeqCst) - 1
-    }
-}
+use serde_json::json;
+use std::{sync::Arc, thread, time::Duration};
+use tokio::{signal, sync::Mutex};
 
 #[tokio::main]
-async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let subscriber = FmtSubscriber::new();
-
-    tracing::subscriber::set_global_default(subscriber)?;
-
-    info!("Starting server");
-
-    let (layer, io) = SocketIo::builder().with_state(UserCnt::new()).build_layer();
-
-    io.ns("/", |s: SocketRef| {
-        s.on(
-            "new message",
-            |s: SocketRef, Data::<String>(msg), Extension::<Username>(username)| {
-                let msg = Res::Message {
-                    username,
-                    message: msg,
-                };
-                s.broadcast().emit("new message", msg).ok();
-            },
-        );
-
-        s.on(
-            "add user",
-            |s: SocketRef, Data::<String>(username), user_cnt: State<UserCnt>| {
-                if s.extensions.get::<Username>().is_some() {
-                    return;
+async fn main() {
+    let auth = json!({"token": "p8q27jwx"});
+    // https://zarena-dev1.zinza.com.vn
+    // http://localhost:3000
+    // Connect to the WebSocket
+    let socket = Arc::new(Mutex::new(
+        ClientBuilder::new("https://zarena-dev1.zinza.com.vn")
+        .auth(auth)
+            .on("error", |err, _| {
+                async move { eprintln!("Error: {:#?}", err) }.boxed()
+            })
+            .on("message", |payload: Payload, socket: Client| {
+                let socket = socket.clone();
+                async move {
+                    match payload {
+                        Payload::Text(values) => println!("Received: {:#?}", values),
+                        Payload::Binary(bin_data) => println!("Received bytes: {:#?}", bin_data),
+                        Payload::String(str) => println!("Received: {}", str),
+                    }
                 }
-                let num_users = user_cnt.add_user();
-                s.extensions.insert(Username(username.clone()));
-                s.emit("login", Res::Login { num_users }).ok();
+                .boxed()
+            })
+            .connect()
+            .await
+            .expect("Connection failed"),
+    ));
+    thread::sleep(Duration::from_secs(1));
 
-                let res = Res::UserEvent {
-                    num_users,
-                    username: Username(username),
-                };
-                s.broadcast().emit("user joined", res).ok();
-            },
-        );
-
-        s.on("typing", |s: SocketRef, Extension::<Username>(username)| {
-            s.broadcast()
-                .emit("typing", Res::Username { username })
-                .ok();
+  
+    // Emit the "join" event
+    {
+        let socket_clone = Arc::clone(&socket);
+        tokio::spawn(async move {
+            let socket = socket_clone.lock().await;
+            socket
+                .emit("join", json!({}))
+                .await
+                .expect("Server unreachable");
         });
+    }
 
-        s.on(
-            "stop typing",
-            |s: SocketRef, Extension::<Username>(username)| {
-                s.broadcast()
-                    .emit("stop typing", Res::Username { username })
-                    .ok();
-            },
-        );
+    println!("Connected to the server. Press Ctrl+C to disconnect.");
 
-        s.on_disconnect(
-            |s: SocketRef, user_cnt: State<UserCnt>, Extension::<Username>(username)| {
-                // let num_users = user_cnt.remove_user();
-                // let res = Res::UserEvent {
-                //     num_users,
-                //     username,
-                // };
-                // s.broadcast().emit("user left", res).ok();
-            },
-        );
-    });
+    // Wait for Ctrl+C signal
+    signal::ctrl_c().await.expect("Failed to listen for Ctrl+C");
 
-    let app = axum::Router::new()
-        .nest_service("/", ServeDir::new("dist"))
-        .layer(
-            ServiceBuilder::new()
-                .layer(CorsLayer::permissive()) // Enable CORS policy
-                .layer(layer),
-        );
+    // Perform disconnection
+    {
+        let socket_clone = Arc::clone(&socket);
+        let _ = tokio::spawn(async move {
+            let socket = socket_clone.lock().await;
+            // Check if the library has a disconnect method
+            if let Err(e) = socket.disconnect().await {
+                eprintln!("Disconnect failed: {:#?}", e);
+            }
+        })
+        .await; // Wait for the disconnection task to complete
+    }
 
-    let listener = tokio::net::TcpListener::bind("0.0.0.0:3000").await.unwrap();
-    axum::serve(listener, app).await.unwrap();
-
-    Ok(())
+    println!("Disconnected from the server.");
 }
